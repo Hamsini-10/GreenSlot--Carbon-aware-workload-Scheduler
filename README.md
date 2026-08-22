@@ -18,8 +18,10 @@ Data centers run many non-time-sensitive workloads immediately, regardless of gr
 Python, Streamlit, Plotly, UK Carbon Intensity API (no key required)
 
 ## How to Run
+```
 pip install streamlit plotly requests
 python -m streamlit run app.py
+```
 
 ## Future Work
 - Real infrastructure integration (Kubernetes, Airflow job queues)
@@ -31,4 +33,4 @@ python -m streamlit run app.py
 - Verified urgency workflows tied to SLA metadata
 
 ## Team
-Built for [Hackathon Name] by [Team Name].
+Built for HackITxMRDU'26 by hamsini and team.
