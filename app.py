@@ -1,7 +1,8 @@
 import streamlit as st
 import plotly.graph_objects as go
+import pandas as pd
 from scheduler import recommend_schedule, check_urgent_abuse
-from carbon_data import get_real_forecast, get_current_forecast_vs_actual
+from carbon_data import get_real_forecast, get_current_forecast_vs_actual, get_sample_price_forecast
 
 st.set_page_config(page_title="GreenSlot", page_icon="🌱", layout="wide")
 
@@ -47,11 +48,6 @@ st.markdown("""
         padding: 12px 16px; margin: 10px 0; color: #fde68a;
     }
     .abuse-banner strong { color: #fbbf24; }
-    .fail-banner {
-        background: #2a1414; border-left: 4px solid #ef4444; border-radius: 8px;
-        padding: 12px 16px; margin: 10px 0; color: #fecaca;
-    }
-    .fail-banner strong { color: #f87171; }
     div.stButton > button {
         background-color: #34d399; color: #0a1612; border-radius: 10px;
         padding: 0.6em 1.6em; font-weight: 600; border: none;
@@ -76,6 +72,7 @@ if "urgent_count" not in st.session_state:
 forecast, data_source = get_real_forecast()
 current = get_current_forecast_vs_actual()
 current_intensity = current["actual"] if current else forecast[0]
+price_forecast = get_sample_price_forecast()
 
 total_jobs = len(st.session_state.job_history)
 urgent_jobs = sum(1 for j in st.session_state.job_history if j["Urgency"] == "urgent")
@@ -108,7 +105,14 @@ if current:
     diff = current["actual"] - current["forecast"]
     st.caption(f"Live check — forecast {current['forecast']} gCO2/kWh vs actual {current['actual']} gCO2/kWh ({diff:+.0f}).")
 
-tab1, tab2, tab3, tab4 = st.tabs(["➕ Add workload", "📊 Schedule", "🌍 Impact", "ℹ️ About"])
+    if abs(diff) > 20:
+        st.warning(
+            f"⚠️ **Forecast anomaly detected:** actual carbon intensity differs from the forecast "
+            f"by {diff:+.0f} gCO2/kWh. In production, this would trigger a reliability alert to "
+            f"the scheduling team, since large forecast errors reduce confidence in recommendations."
+        )
+
+tab1, tab2, tab3 = st.tabs(["➕ Add workload", "📊 Schedule", "ℹ️ About"])
 
 default_energy_by_type = {
     "Backup": 2.0, "Report generation": 0.5, "ML training": 15.0,
@@ -130,8 +134,10 @@ with tab1:
     use_deadline = st.checkbox("Set a deadline?")
     deadline = None
     if use_deadline:
-        deadline = st.number_input("Must finish by hour (0-23)", min_value=0, max_value=23, value=12)
-        st.caption("⚠️ A tight deadline combined with earlier booked jobs can mean no slot is available.")
+        deadline = st.number_input(
+            "Must finish by hour (0-23)",
+            min_value=duration, max_value=23, value=max(12, duration)
+        )
 
     job_type = st.selectbox("Job type", list(default_energy_by_type.keys()))
     energy_kwh = st.number_input(
@@ -139,6 +145,13 @@ with tab1:
         min_value=0.0, value=default_energy_by_type[job_type], step=0.5,
         help="Typical default — not a real measurement. Edit if known."
     )
+    department = st.text_input("Department / Team (optional)", placeholder="e.g. ML Ops, Finance")
+
+    use_combined = st.checkbox("Optimize for cost AND carbon together (simulated pricing)")
+    cost_weight = 0.5
+    if use_combined:
+        cost_weight = st.slider("Weight: carbon vs cost", 0.0, 1.0, 0.5,
+                                 help="0 = carbon only, 1 = cost only, 0.5 = balanced")
 
     if st.button("⚡ Get recommendation"):
         if job_name.strip() == "":
@@ -150,19 +163,18 @@ with tab1:
             result = recommend_schedule(
                 job_name, urgency, forecast, duration=duration,
                 booked_hours=st.session_state.booked_hours,
-                deadline=deadline, urgent_reason=urgent_reason
+                deadline=deadline, urgent_reason=urgent_reason,
+                price_forecast=price_forecast if use_combined else None,
+                cost_weight=cost_weight
             )
 
             if result["recommended_hour"] is None:
-                st.markdown(f"""
-                <div class="fail-banner">
-                    <strong>❌ No slot could be scheduled</strong><br>
-                    <span style="font-size:13px;">{result['reason']}</span>
-                </div>
-                """, unsafe_allow_html=True)
+                st.info(f"ℹ️ {result['reason']} Try a different duration or add fewer jobs first.")
             else:
                 st.success(f"Recommended hour: {result['recommended_hour']}")
                 st.write(f"**Carbon intensity at that time:** {result['carbon_intensity']}")
+                if result["estimated_price"] is not None:
+                    st.write(f"**Simulated price at that time:** ${result['estimated_price']}/kWh")
                 st.write(f"**Reason:** {result['reason']}")
 
             abuse_warning = check_urgent_abuse(st.session_state.urgent_count)
@@ -189,14 +201,19 @@ with tab1:
                     st.info(f"**Estimated emissions:** now ≈ {immediate_kg:.2f} kg CO2, recommended ≈ {recommended_kg:.2f} kg CO2 "
                             f"(saving ≈ {kg_saved:.2f} kg CO2). *(Based on {energy_kwh} kWh for '{job_type}' — not measured.)*")
 
-            st.session_state.job_history.append({
-                "Job": job_name, "Type": job_type, "Urgency": urgency,
-                "Duration (hrs)": duration,
-                "Scheduled hour": result["recommended_hour"] if result["recommended_hour"] is not None else "—",
-                "Carbon intensity": result["carbon_intensity"] if result["carbon_intensity"] is not None else "—",
-                "kg_saved": kg_saved,
-                "Note": "No slot found" if result["recommended_hour"] is None else ""
-            })
+                if energy_kwh and energy_kwh > 0:
+                    price_now = result["estimated_price"] if result["estimated_price"] is not None else price_forecast[0]
+                    cost = energy_kwh * price_now
+                    st.info(f"**Estimated electricity cost:** ≈ ${cost:.2f} for this job. "
+                            f"*(Based on simulated hourly pricing — not real market data.)*")
+
+            if result["recommended_hour"] is not None:
+                st.session_state.job_history.append({
+                    "Job": job_name, "Type": job_type, "Urgency": urgency,
+                    "Department": department if department.strip() else "Unassigned",
+                    "Duration (hrs)": duration, "Scheduled hour": result["recommended_hour"],
+                    "Carbon intensity": result["carbon_intensity"], "kg_saved": kg_saved
+                })
             st.rerun()
 
 with tab2:
@@ -264,37 +281,39 @@ with tab2:
             for job in st.session_state.job_history
         ]
         st.table(display_rows)
+
+        df = pd.DataFrame(display_rows)
+        csv = df.to_csv(index=False).encode("utf-8")
+        st.download_button(
+            label="⬇️ Download report as CSV",
+            data=csv,
+            file_name="greenslot_schedule_report.csv",
+            mime="text/csv"
+        )
+
+        st.subheader("Savings by department")
+        dept_totals = {}
+        for job in st.session_state.job_history:
+            dept = job.get("Department", "Unassigned")
+            dept_totals[dept] = dept_totals.get(dept, 0) + job.get("kg_saved", 0)
+        for dept, kg in dept_totals.items():
+            st.write(f"**{dept}**: {kg:.2f} kg CO2 saved")
     else:
         st.caption("No jobs added yet — add one in the 'Add workload' tab.")
 
 with tab3:
-    st.subheader("Environmental impact")
-    if total_jobs == 0:
-        st.caption("Add a job to see its estimated impact here.")
-    else:
-        col1, col2 = st.columns(2)
-        col1.metric("Total CO2 saved this session", f"{total_kg_saved:.2f} kg")
-        km_equivalent = total_kg_saved / 0.12
-        col2.metric("Roughly equivalent to", f"{km_equivalent:.1f} km not driven")
-        st.caption(
-            "Equivalence is a rough, illustrative estimate (based on a commonly cited average "
-            "car emissions figure of ~120g CO2/km), not a precise calculation."
-        )
-
-        st.write("**Per-job breakdown:**")
-        for job in st.session_state.job_history:
-            if job.get("kg_saved"):
-                st.write(f"- {job['Job']} ({job['Type']}): {job['kg_saved']:.2f} kg CO2 saved")
-
-with tab4:
     st.write("""
     **GreenSlot** schedules flexible data-center workloads during lower-carbon-intensity
     electricity periods, while urgent jobs still run immediately with no delay.
 
     - Real live carbon data from the UK Carbon Intensity API, with automatic fallback
+    - Forecast-vs-actual anomaly detection
     - Duration- and deadline-aware scheduling
     - Conflict avoidance across multiple jobs in a session
-    - Carbon and emissions savings estimates
+    - Optional combined cost + carbon optimization (simulated pricing)
+    - Carbon, cost, and emissions savings estimates
+    - Department-level savings breakdown
+    - CSV export for reporting
     - Urgent-job justification and misuse-pattern detection
     """)
     st.write("**Team:** [Team Name] | **Hackathon:** [Hackathon Name]")
