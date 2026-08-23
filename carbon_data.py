@@ -43,4 +43,34 @@ def get_current_forecast_vs_actual():
         d = response.json()["data"][0]
         return {
             "forecast": d["intensity"]["forecast"],
-            
+            "actual": d["intensity"]["actual"]
+        }
+    except Exception:
+        return None
+
+
+def get_sample_price_forecast():
+    """
+    Returns a SIMULATED 24-hour electricity price forecast ($/kWh), following
+    a typical off-peak/on-peak shape (cheaper at night, more expensive in the
+    evening). This is NOT real market pricing data — no free, no-signup real-time
+    electricity pricing API was available for this hackathon, so this is clearly
+    labeled sample data, used only to demonstrate combined cost+carbon scheduling.
+    """
+    return [0.10, 0.10, 0.09, 0.09, 0.08, 0.08, 0.09, 0.11, 0.14, 0.18,
+            0.22, 0.20, 0.18, 0.17, 0.15, 0.13, 0.12, 0.12, 0.14, 0.17,
+            0.20, 0.19, 0.16, 0.12]
+
+
+if __name__ == "__main__":
+    forecast, source = get_real_forecast()
+    print(f"Data source: {source}")
+    print(f"24-hour forecast: {forecast}")
+
+    current = get_current_forecast_vs_actual()
+    if current:
+        diff = current['actual'] - current['forecast']
+        print(f"Forecast: {current['forecast']} | Actual: {current['actual']} | Diff: {diff:+.0f}")
+
+    price = get_sample_price_forecast()
+    print(f"Sample price forecast: {price}")
