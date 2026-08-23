@@ -68,6 +68,8 @@ if "job_history" not in st.session_state:
     st.session_state.job_history = []
 if "urgent_count" not in st.session_state:
     st.session_state.urgent_count = 0
+if "last_result" not in st.session_state:
+    st.session_state.last_result = None
 
 forecast, data_source = get_real_forecast()
 current = get_current_forecast_vs_actual()
@@ -112,7 +114,7 @@ if current:
             f"the scheduling team, since large forecast errors reduce confidence in recommendations."
         )
 
-tab1, tab2, tab3 = st.tabs(["➕ Add workload", "📊 Schedule", "ℹ️ About"])
+tab1, tab2, tab3, tab4 = st.tabs(["➕ Add workload", "📊 Schedule", "🌍 Impact", "ℹ️ About"])
 
 default_energy_by_type = {
     "Backup": 2.0, "Report generation": 0.5, "ML training": 15.0,
@@ -155,7 +157,7 @@ with tab1:
 
     if st.button("⚡ Get recommendation"):
         if job_name.strip() == "":
-            st.warning("Please enter a job name first.")
+            st.session_state.last_result = {"error": "Please enter a job name first."}
         else:
             if urgency == "urgent":
                 st.session_state.urgent_count += 1
@@ -168,6 +170,45 @@ with tab1:
                 cost_weight=cost_weight
             )
 
+            abuse_warning = check_urgent_abuse(st.session_state.urgent_count)
+
+            kg_saved = 0
+            savings_percent = None
+            immediate_kg = recommended_kg = cost = None
+            if urgency == "flexible" and result["recommended_hour"] is not None:
+                immediate_intensity = forecast[0]
+                recommended_intensity = result["carbon_intensity"]
+                if immediate_intensity > 0:
+                    savings_percent = ((immediate_intensity - recommended_intensity) / immediate_intensity) * 100
+                if energy_kwh and energy_kwh > 0:
+                    immediate_kg = (immediate_intensity * energy_kwh) / 1000
+                    recommended_kg = (recommended_intensity * energy_kwh) / 1000
+                    kg_saved = immediate_kg - recommended_kg
+                    price_now = result["estimated_price"] if result["estimated_price"] is not None else price_forecast[0]
+                    cost = energy_kwh * price_now
+
+            if result["recommended_hour"] is not None:
+                st.session_state.job_history.append({
+                    "Job": job_name, "Type": job_type, "Urgency": urgency,
+                    "Department": department if department.strip() else "Unassigned",
+                    "Duration (hrs)": duration, "Scheduled hour": result["recommended_hour"],
+                    "Carbon intensity": result["carbon_intensity"], "kg_saved": kg_saved
+                })
+
+            st.session_state.last_result = {
+                "error": None, "result": result, "abuse_warning": abuse_warning,
+                "energy_kwh": energy_kwh, "job_type": job_type, "data_source": data_source,
+                "savings_percent": savings_percent, "immediate_kg": immediate_kg,
+                "recommended_kg": recommended_kg, "kg_saved": kg_saved, "cost": cost
+            }
+
+    # Display the last result persistently (survives Streamlit reruns)
+    if st.session_state.last_result:
+        r = st.session_state.last_result
+        if r["error"]:
+            st.warning(r["error"])
+        else:
+            result = r["result"]
             if result["recommended_hour"] is None:
                 st.info(f"ℹ️ {result['reason']} Try a different duration or add fewer jobs first.")
             else:
@@ -177,44 +218,22 @@ with tab1:
                     st.write(f"**Simulated price at that time:** ${result['estimated_price']}/kWh")
                 st.write(f"**Reason:** {result['reason']}")
 
-            abuse_warning = check_urgent_abuse(st.session_state.urgent_count)
-            if abuse_warning:
+            if r["abuse_warning"]:
                 st.markdown(f"""
                 <div class="abuse-banner">
                     <strong>Possible misuse detected</strong><br>
-                    <span style="font-size:13px;">{abuse_warning}</span>
+                    <span style="font-size:13px;">{r['abuse_warning']}</span>
                 </div>
                 """, unsafe_allow_html=True)
 
-            kg_saved = 0
-            if urgency == "flexible" and result["recommended_hour"] is not None:
-                immediate_intensity = forecast[0]
-                recommended_intensity = result["carbon_intensity"]
-                if immediate_intensity > 0:
-                    savings_percent = ((immediate_intensity - recommended_intensity) / immediate_intensity) * 100
-                    st.info(f"**Estimated carbon reduction:** ~{savings_percent:.1f}% vs running now. *(Based on {data_source} data.)*")
-
-                if energy_kwh and energy_kwh > 0:
-                    immediate_kg = (immediate_intensity * energy_kwh) / 1000
-                    recommended_kg = (recommended_intensity * energy_kwh) / 1000
-                    kg_saved = immediate_kg - recommended_kg
-                    st.info(f"**Estimated emissions:** now ≈ {immediate_kg:.2f} kg CO2, recommended ≈ {recommended_kg:.2f} kg CO2 "
-                            f"(saving ≈ {kg_saved:.2f} kg CO2). *(Based on {energy_kwh} kWh for '{job_type}' — not measured.)*")
-
-                if energy_kwh and energy_kwh > 0:
-                    price_now = result["estimated_price"] if result["estimated_price"] is not None else price_forecast[0]
-                    cost = energy_kwh * price_now
-                    st.info(f"**Estimated electricity cost:** ≈ ${cost:.2f} for this job. "
-                            f"*(Based on simulated hourly pricing — not real market data.)*")
-
-            if result["recommended_hour"] is not None:
-                st.session_state.job_history.append({
-                    "Job": job_name, "Type": job_type, "Urgency": urgency,
-                    "Department": department if department.strip() else "Unassigned",
-                    "Duration (hrs)": duration, "Scheduled hour": result["recommended_hour"],
-                    "Carbon intensity": result["carbon_intensity"], "kg_saved": kg_saved
-                })
-            st.rerun()
+            if r["savings_percent"] is not None:
+                st.info(f"**Estimated carbon reduction:** ~{r['savings_percent']:.1f}% vs running now. *(Based on {r['data_source']} data.)*")
+            if r["immediate_kg"] is not None:
+                st.info(f"**Estimated emissions:** now ≈ {r['immediate_kg']:.2f} kg CO2, recommended ≈ {r['recommended_kg']:.2f} kg CO2 "
+                        f"(saving ≈ {r['kg_saved']:.2f} kg CO2). *(Based on {r['energy_kwh']} kWh for '{r['job_type']}' — not measured.)*")
+            if r["cost"] is not None:
+                st.info(f"**Estimated electricity cost:** ≈ ${r['cost']:.2f} for this job. "
+                        f"*(Based on simulated hourly pricing — not real market data.)*")
 
 with tab2:
     col_left, col_right = st.columns([1.4, 1])
@@ -302,6 +321,24 @@ with tab2:
         st.caption("No jobs added yet — add one in the 'Add workload' tab.")
 
 with tab3:
+    st.subheader("Environmental impact")
+    if total_jobs == 0:
+        st.caption("Add a job to see its estimated impact here.")
+    else:
+        col1, col2 = st.columns(2)
+        col1.metric("Total CO2 saved this session", f"{total_kg_saved:.2f} kg")
+        km_equivalent = total_kg_saved / 0.12
+        col2.metric("Roughly equivalent to", f"{km_equivalent:.1f} km not driven")
+        st.caption(
+            "Equivalence is a rough, illustrative estimate (based on a commonly cited average "
+            "car emissions figure of ~120g CO2/km), not a precise calculation."
+        )
+        st.write("**Per-job breakdown:**")
+        for job in st.session_state.job_history:
+            if job.get("kg_saved"):
+                st.write(f"- {job['Job']} ({job['Type']}): {job['kg_saved']:.2f} kg CO2 saved")
+
+with tab4:
     st.write("""
     **GreenSlot** schedules flexible data-center workloads during lower-carbon-intensity
     electricity periods, while urgent jobs still run immediately with no delay.
